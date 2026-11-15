@@ -53,14 +53,14 @@ npm start
 
 ## 🎮 Sleep Paralyzer (Pygame)
 
-The starter game is [`app.py`](./app.py), a blink-controlled sleep-paralysis encounter sequence. Blink once to banish Meatball and three times to banish Big Meatball; each must be cleared within five seconds. The door opens for Creep, who jumpscares the player up close after a random 2–5 second wait; avoid blinking for five uninterrupted seconds afterward to banish it. In the open-window fog scene, close your eyes within two seconds, then hold **Space** for five seconds to clear the screen or lose. Every blink moves Weep closer; the 20th blink ends the run. Meatball and Big Meatball cause a loss if they remain for more than five seconds.
+The starter game is [`app.py`](./app.py), a blink-controlled sleep-paralysis game. Its first round is scripted: blink once to banish Meatball and three times to banish Big Meatball (each within five seconds), survive Creep's 2–5 second wind-up and then stare without blinking for five seconds, and close your eyes within two seconds of the Fog appearing and hold **Space** for five seconds. After that, encounters are randomly selected and continue endlessly until you lose; the tutorial instructions are shown only during the scripted round. Every blink moves Weep closer, but Weep returns to the back of the room whenever Creep or the Fog appears. The 20th blink between those resets ends the run.
 
 ```bash
 pip install -r requirements.txt
 python app.py
 ```
 
-The title screen has **Play**, **Credits**, **Connect Octopus 16 (BLE)**, **Disconnect**, and **Simulator Mode**. Press **Space** to blink in-game, and hold it during the fog encounter (also works while BLE is connected); the current BLE input detects discrete blinks, not sustained eye closure. The game-over screen shows time played and offers restart and main-menu buttons. Keyboard shortcuts: `Enter` to play, `S` for simulator, `B` for BLE, `D` to disconnect from the title screen, `R` to restart after a game, and `Esc` to quit. BLE blinking uses a simple 115 µV peak trigger; movement or other signal artifacts can cause false triggers.
+The title screen has **Play**, **Credits**, **Connect Octopus 16 (BLE)**, **Disconnect**, and **Simulator Mode**. Door and window transitions have distinct sound effects, with soft cricket chirps playing intermittently during gameplay. Press **Space** to blink in-game, and hold it during the fog encounter (also works while BLE is connected); the current BLE input detects discrete blinks, not sustained eye closure. The end screen shows time played, encounters cleared, and score (`1,000` points per encounter plus `10` points per second), with restart and main-menu buttons. Keyboard shortcuts: `Enter` to play, `S` for simulator, `B` for BLE, `D` to disconnect from the title screen, `R` to restart after a game, and `Esc` to quit. BLE blinking uses a simple 115 µV peak trigger; movement or other signal artifacts can cause false triggers.
 
 ---
 

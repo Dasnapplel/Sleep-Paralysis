@@ -1,5 +1,7 @@
 import asyncio
+from array import array
 from bisect import bisect_right
+import math
 import queue
 import random
 import threading
@@ -29,12 +31,21 @@ CREEP_JUMPSCARE_MAX_SECONDS = 5.0
 FOG_CLOSE_DEADLINE_SECONDS = 2.0
 CLOSED_EYES_SECONDS = 5.0
 ANGEL_BLINK_LIMIT = 20
+SCORE_PER_SECOND = 10
+SCORE_PER_EVENT = 1000
+SOUND_SAMPLE_RATE = 22050
 
 PALE = (235, 231, 221)
 AMBER = (255, 190, 104)
 RED = (228, 107, 111)
 GREEN = (158, 220, 174)
 WHITE = (255, 255, 255)
+
+
+def calculate_score(time_played: float, events_defeated: int) -> int:
+    time_points = round(max(0.0, time_played) * SCORE_PER_SECOND)
+    event_points = max(0, events_defeated) * SCORE_PER_EVENT
+    return time_points + event_points
 
 
 class Encounter(NamedTuple):
@@ -78,11 +89,14 @@ ENCOUNTERS = (
 class GameSession:
     def __init__(self, now: float) -> None:
         self.encounter_index = 0
+        self.encounter_serial = 0
+        self.round_number = 1
         self.encounter_started_at = now
         self.stare_started_at = now
         self.last_blink_at = float("-inf")
         self.blink_progress = 0
         self.angel_blinks = 0
+        self.events_defeated = 0
         self.creep_jumpscared = False
         self.creep_jumpscare_at: Optional[float] = None
         self.closed_eyes_started = False
@@ -117,8 +131,8 @@ class GameSession:
                 )
         elif self.encounter.input_type == "stare":
             if self.creep_jumpscared:
-                self.stare_started_at = now
-                self.message = "You blinked. Keep staring at Creep for 5 seconds."
+                self.result = "lost"
+                self.message = "You blinked while staring at Creep. Press R to try again."
             else:
                 self.message = "The open door waits. Watch for Creep."
         else:
@@ -159,16 +173,16 @@ class GameSession:
                 self.message = "You opened your eyes too soon. Press R to try again."
                 return
             if self.closed_eyes_progress >= CLOSED_EYES_SECONDS:
-                self.result = "won"
-                self.message = "Dawn breaks. The fog and every demon disappear."
+                self._advance(now)
 
     def _advance(self, now: float) -> None:
-        if self.encounter_index + 1 >= len(ENCOUNTERS):
-            self.result = "won"
-            self.message = "Dawn breaks. You made it through the night."
-            return
-
-        self.encounter_index += 1
+        self.events_defeated += 1
+        if self.round_number == 1 and self.encounter_index + 1 < len(ENCOUNTERS):
+            self.encounter_index += 1
+        else:
+            self.round_number = 2
+            self.encounter_index = random.randrange(len(ENCOUNTERS))
+        self.encounter_serial += 1
         self.encounter_started_at = now
         self.stare_started_at = now
         self.blink_progress = 0
@@ -176,6 +190,8 @@ class GameSession:
         self.creep_jumpscare_at = None
         self.closed_eyes_started = False
         self.closed_eyes_progress = 0.0
+        if self.encounter.input_type in ("stare", "hold"):
+            self.angel_blinks = 0
         if self.encounter.input_type == "stare":
             delay = random.uniform(
                 CREEP_JUMPSCARE_MIN_SECONDS,
@@ -185,6 +201,9 @@ class GameSession:
         self._set_encounter_message()
 
     def _set_encounter_message(self) -> None:
+        if self.round_number > 1:
+            self.message = ""
+            return
         if self.encounter.input_type == "blink":
             self.message = (
                 f"{self.encounter.name} is here. Blink "
@@ -250,6 +269,44 @@ class AnimatedSprite:
         return self.scaled_frame
 
 
+class SoundEffects:
+    def __init__(self, assets_dir: Path) -> None:
+        self.door_open = pygame.mixer.Sound(
+            str(assets_dir / "DOOR CREAKING SOUND EFFECT - FREE.mp3")
+        )
+        self.window_open = pygame.mixer.Sound(
+            str(assets_dir / "Open and Close Window - Sound Effect for editing.mp3")
+        )
+        self.cricket = self._make_sound(self._cricket_samples())
+        self.door_open.set_volume(0.55)
+        self.window_open.set_volume(0.45)
+        self.cricket.set_volume(0.12)
+
+    @staticmethod
+    def _make_sound(samples: array) -> pygame.mixer.Sound:
+        return pygame.mixer.Sound(buffer=samples.tobytes())
+
+    @staticmethod
+    def _cricket_samples() -> array:
+        duration = 0.72
+        chirp_starts = (0.04, 0.22, 0.40, 0.58)
+        chirp_duration = 0.055
+        samples = array("h")
+        for index in range(round(SOUND_SAMPLE_RATE * duration)):
+            t = index / SOUND_SAMPLE_RATE
+            value = 0.0
+            for start in chirp_starts:
+                local_t = t - start
+                if 0.0 <= local_t <= chirp_duration:
+                    fade_in = min(1.0, local_t / 0.004)
+                    fade_out = min(1.0, (chirp_duration - local_t) / 0.008)
+                    envelope = fade_in * fade_out
+                    frequency = 4700.0 + 180.0 * math.sin(local_t * 45.0)
+                    value += 0.25 * math.sin(2.0 * math.pi * frequency * local_t) * envelope
+            samples.append(round(32767 * max(-1.0, min(1.0, value))))
+        return samples
+
+
 def decode_octopus16_packet(packet: bytes) -> Optional[list[float]]:
     if len(packet) < PACKET_SIZE:
         return None
@@ -308,7 +365,30 @@ async def stream_ble(stop_event: threading.Event, ui_events: queue.Queue) -> Non
 
 
 def main() -> None:
+    assets_dir = Path(__file__).resolve().parent / "assets"
+    pygame.mixer.pre_init(
+        frequency=SOUND_SAMPLE_RATE,
+        size=-16,
+        channels=1,
+        buffer=512,
+    )
     pygame.init()
+    audio_error: Optional[str] = None
+    sound_effects: Optional[SoundEffects] = None
+    try:
+        if pygame.mixer.get_init() != (SOUND_SAMPLE_RATE, -16, 1):
+            pygame.mixer.quit()
+            pygame.mixer.init(
+                frequency=SOUND_SAMPLE_RATE,
+                size=-16,
+                channels=1,
+                buffer=512,
+            )
+        pygame.mixer.set_num_channels(8)
+        sound_effects = SoundEffects(assets_dir)
+    except pygame.error as error:
+        audio_error = f"Audio unavailable: {error}"
+
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption("Sleep Paralyzer — A PiEEG Blink-Controlled Horror Game")
     clock = pygame.time.Clock()
@@ -317,8 +397,6 @@ def main() -> None:
     screen_title_font = pygame.font.SysFont("consolas", 64, bold=True)
     section_title_font = pygame.font.SysFont("consolas", 42, bold=True)
     menu_button_font = pygame.font.SysFont("consolas", 24, bold=True)
-    assets_dir = Path(__file__).resolve().parent / "assets"
-
     def load_background(filename: str) -> tuple[pygame.Surface, tuple[int, int]]:
         image = pygame.image.load(str(assets_dir / filename)).convert()
         image_width, image_height = image.get_size()
@@ -363,6 +441,7 @@ def main() -> None:
     screen_state = "title"
     game_started_at = now
     game_time_played = 0.0
+    next_cricket_at = now + random.uniform(5.0, 9.0)
 
     play_button = pygame.Rect(500, 284, 280, 62)
     credits_button = pygame.Rect(500, 365, 280, 56)
@@ -370,8 +449,8 @@ def main() -> None:
     connect_button = pygame.Rect(55, 590, 350, 48)
     simulator_button = pygame.Rect(465, 590, 350, 48)
     disconnect_button = pygame.Rect(875, 590, 350, 48)
-    restart_button = pygame.Rect(385, 425, 230, 58)
-    result_menu_button = pygame.Rect(665, 425, 230, 58)
+    restart_button = pygame.Rect(385, 480, 230, 58)
+    result_menu_button = pygame.Rect(665, 480, 230, 58)
     menu_overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
     menu_overlay.fill((0, 0, 0, 170))
     hud_panel = pygame.Surface((WIDTH, 104), pygame.SRCALPHA)
@@ -405,10 +484,20 @@ def main() -> None:
         connection_status = "Simulator ready — SPACE = blink"
 
     def draw_button(rect: pygame.Rect, label: str, selected: bool = False) -> None:
-        fill = (64, 88, 112) if selected else (31, 42, 60)
+        hovered = rect.collidepoint(pygame.mouse.get_pos())
+        if hovered:
+            fill = (88, 119, 152) if selected else (52, 75, 102)
+            border = AMBER
+            border_width = 3
+            text_color = WHITE
+        else:
+            fill = (64, 88, 112) if selected else (31, 42, 60)
+            border = (151, 166, 178)
+            border_width = 2
+            text_color = PALE
         pygame.draw.rect(screen, fill, rect)
-        pygame.draw.rect(screen, (151, 166, 178), rect, 2)
-        text = menu_button_font.render(label, True, PALE)
+        pygame.draw.rect(screen, border, rect, border_width)
+        text = menu_button_font.render(label, True, text_color)
         screen.blit(text, text.get_rect(center=rect.center))
 
     def draw_menu_background() -> None:
@@ -425,7 +514,11 @@ def main() -> None:
 
         status_color = GREEN if input_mode == "SIMULATOR" else AMBER
         status = small_font.render(connection_status, True, status_color)
-        screen.blit(status, status.get_rect(center=(WIDTH // 2, 550)))
+        status_y = 535 if audio_error else 550
+        screen.blit(status, status.get_rect(center=(WIDTH // 2, status_y)))
+        if audio_error:
+            warning = small_font.render(audio_error, True, RED)
+            screen.blit(warning, warning.get_rect(center=(WIDTH // 2, 558)))
         draw_button(connect_button, "Connect Octopus 16 (BLE)", input_mode.startswith("BLE"))
         draw_button(simulator_button, "Simulator Mode", input_mode == "SIMULATOR")
         draw_button(disconnect_button, "Disconnect")
@@ -441,10 +534,16 @@ def main() -> None:
 
     def draw_game_hud(now: float) -> None:
         screen.blit(hud_panel, (0, 0))
-        encounter_label = (
-            f"{session.encounter.name.upper()}  "
-            f"{session.encounter_index + 1:02d}/{len(ENCOUNTERS)}"
-        )
+        if session.round_number == 1:
+            encounter_label = (
+                f"{session.encounter.name.upper()}  "
+                f"{session.encounter_index + 1:02d}/{len(ENCOUNTERS)}"
+            )
+        else:
+            encounter_label = (
+                f"{session.encounter.name.upper()}  "
+                f"#{session.events_defeated + 1:02d}"
+            )
         screen.blit(font.render(encounter_label, True, PALE), (28, 20))
         weep_label = f"WEEP  {session.angel_blinks:02d}/{ANGEL_BLINK_LIMIT}"
         screen.blit(
@@ -457,13 +556,18 @@ def main() -> None:
         )
         input_label = small_font.render(f"INPUT  {input_mode}", True, GREEN if input_mode == "SIMULATOR" else AMBER)
         screen.blit(input_label, (600, 24))
+        show_instructions = session.round_number == 1
 
         if session.encounter.input_type == "blink":
             remaining = max(
                 0.0,
                 ENCOUNTER_SECONDS - (now - session.encounter_started_at),
             )
-            progress_label = f"TIME TO ACT {remaining:0.1f}s"
+            progress_label = (
+                f"TIME TO ACT {remaining:0.1f}s"
+                if show_instructions
+                else f"THREAT {remaining:0.1f}s"
+            )
             progress = 1.0 - remaining / ENCOUNTER_SECONDS
             progress_color = AMBER if remaining > 2.0 else RED
         elif (
@@ -473,12 +577,20 @@ def main() -> None:
         ):
             delay = session.creep_jumpscare_at - session.encounter_started_at
             remaining = max(0.0, session.creep_jumpscare_at - now)
-            progress_label = f"CREEP IN {remaining:0.1f}s"
+            progress_label = (
+                f"CREEP IN {remaining:0.1f}s"
+                if show_instructions
+                else f"CREEP {remaining:0.1f}s"
+            )
             progress = 1.0 - remaining / delay
             progress_color = AMBER if remaining > 1.0 else RED
         elif session.encounter.input_type == "stare":
             stared = min(STARE_SECONDS, now - session.stare_started_at)
-            progress_label = f"NO BLINK {stared:0.1f}/{STARE_SECONDS:.0f}s"
+            progress_label = (
+                f"NO BLINK {stared:0.1f}/{STARE_SECONDS:.0f}s"
+                if show_instructions
+                else f"STARE {stared:0.1f}/{STARE_SECONDS:.0f}s"
+            )
             progress = stared / STARE_SECONDS
             progress_color = GREEN
         elif not session.closed_eyes_started:
@@ -486,12 +598,19 @@ def main() -> None:
                 0.0,
                 FOG_CLOSE_DEADLINE_SECONDS - (now - session.encounter_started_at),
             )
-            progress_label = f"CLOSE EYES {remaining:0.1f}s"
+            progress_label = (
+                f"CLOSE EYES {remaining:0.1f}s"
+                if show_instructions
+                else f"FOG IN {remaining:0.1f}s"
+            )
             progress = 1.0 - remaining / FOG_CLOSE_DEADLINE_SECONDS
             progress_color = AMBER if remaining > 1.0 else RED
         else:
             progress_label = (
                 f"HOLD CLOSED {session.closed_eyes_progress:0.1f}/"
+                f"{CLOSED_EYES_SECONDS:.0f}s"
+                if show_instructions
+                else f"FOG {session.closed_eyes_progress:0.1f}/"
                 f"{CLOSED_EYES_SECONDS:.0f}s"
             )
             progress = session.closed_eyes_progress / CLOSED_EYES_SECONDS
@@ -505,11 +624,12 @@ def main() -> None:
             pygame.Rect(980, 48, int(260 * max(0.0, min(progress, 1.0))), 14),
         )
 
-        message_box = pygame.Rect(110, HEIGHT - 78, WIDTH - 220, 52)
-        pygame.draw.rect(screen, (8, 12, 22), message_box)
-        pygame.draw.rect(screen, (123, 137, 151), message_box, 2)
-        text = font.render(session.message, True, PALE)
-        screen.blit(text, text.get_rect(center=message_box.center))
+        if show_instructions:
+            message_box = pygame.Rect(110, HEIGHT - 78, WIDTH - 220, 52)
+            pygame.draw.rect(screen, (8, 12, 22), message_box)
+            pygame.draw.rect(screen, (123, 137, 151), message_box, 2)
+            text = font.render(session.message, True, PALE)
+            screen.blit(text, text.get_rect(center=message_box.center))
 
     def format_play_time(seconds: float) -> str:
         minutes, remaining_seconds = divmod(max(0, int(seconds)), 60)
@@ -522,12 +642,21 @@ def main() -> None:
         )
         title = screen_title_font.render(result_title, True, PALE)
         screen.blit(title, title.get_rect(center=(WIDTH // 2, 235)))
+        score = calculate_score(game_time_played, session.events_defeated)
+        score_text = section_title_font.render(f"SCORE {score:,}", True, PALE)
+        screen.blit(score_text, score_text.get_rect(center=(WIDTH // 2, 325)))
+        encounters = small_font.render(
+            f"ENCOUNTERS CLEARED  {session.events_defeated}",
+            True,
+            PALE,
+        )
+        screen.blit(encounters, encounters.get_rect(center=(WIDTH // 2, 380)))
         elapsed = small_font.render(
             f"TIME PLAYED  {format_play_time(game_time_played)}",
             True,
             PALE,
         )
-        screen.blit(elapsed, elapsed.get_rect(center=(WIDTH // 2, 340)))
+        screen.blit(elapsed, elapsed.get_rect(center=(WIDTH // 2, 420)))
         draw_button(restart_button, "RESTART")
         draw_button(result_menu_button, "MAIN MENU")
 
@@ -565,16 +694,19 @@ def main() -> None:
         screen.blit(angel, (x, y))
 
     def start_game(now: float) -> None:
-        nonlocal session, eyes_closed_held, game_started_at, game_time_played, screen_state
+        nonlocal session, eyes_closed_held, game_started_at, game_time_played
+        nonlocal next_cricket_at, screen_state
         session = GameSession(now)
         eyes_closed_held = False
         game_started_at = now
         game_time_played = 0.0
+        next_cricket_at = now + random.uniform(5.0, 9.0)
         screen_state = "game"
 
     while running:
         dt = min(clock.tick(60) / 1000.0, 0.05)
         now = time.monotonic()
+        previous_encounter_serial = session.encounter_serial
         if screen_state == "game":
             session.update(now, dt, eyes_closed_held)
 
@@ -648,6 +780,17 @@ def main() -> None:
         if screen_state == "game" and session.result is not None:
             screen_state = "result"
             game_time_played = max(0.0, now - game_started_at)
+
+        if screen_state == "game" and session.encounter_serial != previous_encounter_serial:
+            if sound_effects is not None and session.encounter.input_type == "stare":
+                sound_effects.door_open.play()
+            elif sound_effects is not None and session.encounter.input_type == "hold":
+                sound_effects.window_open.play()
+
+        if screen_state == "game" and now >= next_cricket_at:
+            if sound_effects is not None:
+                sound_effects.cricket.play()
+            next_cricket_at = now + random.uniform(6.0, 12.0)
 
         if screen_state == "title":
             draw_title_screen()
