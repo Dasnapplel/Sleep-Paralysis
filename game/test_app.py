@@ -66,31 +66,64 @@ class BleStreamTests(unittest.TestCase):
 
 
 class GameSessionTests(unittest.TestCase):
+    def activate_next_encounter(self, session: GameSession) -> float:
+        if session.transition_until is None:
+            return session.encounter_started_at
+        activation_time = session.transition_until
+        session.update(activation_time, 0.0, False)
+        return activation_time
+
     def enter_creep(self) -> GameSession:
         session = GameSession(0.0)
         session.blink(0.4)
-        session.blink(0.8)
-        session.blink(1.2)
-        session.blink(1.6)
+        now = self.activate_next_encounter(session)
+        for _ in range(3):
+            now += 0.4
+            session.blink(now)
+        self.activate_next_encounter(session)
         self.assertEqual(session.encounter.name, "Creep")
         return session
 
     def enter_fog(self) -> GameSession:
         session = self.enter_creep()
-        session.update(session.creep_jumpscare_at, 0.05, False)
+        jumpscare_at = session.creep_jumpscare_at
+        self.assertIsNotNone(jumpscare_at)
+        session.update(jumpscare_at, 0.05, False)
         session.update(session.stare_started_at + 5.001, 0.05, False)
+        self.activate_next_encounter(session)
         self.assertEqual(session.encounter.name, "The Fog")
         return session
+
+    def test_events_have_a_one_to_two_second_gap(self) -> None:
+        session = GameSession(0.0)
+        session.blink(0.4)
+
+        transition_until = session.transition_until
+        self.assertIsNotNone(transition_until)
+        gap = transition_until - 0.4
+        self.assertGreaterEqual(gap, 1.0)
+        self.assertLessEqual(gap, 2.0)
+        self.assertTrue(session.is_transitioning)
+
+        session.blink(0.8)
+        self.assertEqual(session.blink_progress, 0)
+        self.assertEqual(session.angel_blinks, 2)
+        session.update(transition_until - 0.01, 0.01, False)
+        self.assertTrue(session.is_transitioning)
+        session.update(transition_until, 0.0, False)
+        self.assertFalse(session.is_transitioning)
+        self.assertEqual(session.encounter_serial, 1)
 
     def test_default_demon_takes_one_blink_and_boss_takes_three(self) -> None:
         session = GameSession(0.0)
         session.blink(0.4)
         self.assertEqual(session.encounter.name, "Big Meatball")
 
-        session.blink(0.8)
-        session.blink(1.2)
+        now = self.activate_next_encounter(session)
+        session.blink(now + 0.4)
+        session.blink(now + 0.8)
         self.assertEqual(session.encounter.name, "Big Meatball")
-        session.blink(1.6)
+        session.blink(now + 1.2)
         self.assertEqual(session.encounter.name, "Creep")
 
     def test_blink_demons_time_out_after_five_seconds(self) -> None:
@@ -137,6 +170,8 @@ class GameSessionTests(unittest.TestCase):
         session.update(session.stare_started_at + 5.001, 0.05, False)
 
         self.assertEqual(session.encounter.name, "The Fog")
+        self.assertEqual(session.angel_blinks, 1)
+        self.activate_next_encounter(session)
         self.assertEqual(session.angel_blinks, 0)
 
     def test_fog_must_be_closed_within_two_seconds(self) -> None:
@@ -155,7 +190,7 @@ class GameSessionTests(unittest.TestCase):
 
         self.assertEqual(session.round_number, 2)
         self.assertEqual(session.encounter.name, "The Fog")
-        random_fog_started_at = session.encounter_started_at
+        random_fog_started_at = self.activate_next_encounter(session)
         session.update(random_fog_started_at + 2.01, 0.01, False)
         self.assertIsNone(session.result)
         session.update(random_fog_started_at + 5.01, 0.01, False)
@@ -198,10 +233,17 @@ class GameSessionTests(unittest.TestCase):
                 session.update(fog_started_at + elapsed, 1.0, True)
             self.assertEqual(session.encounter.name, "Meatball")
 
-            now = session.encounter_started_at
-            for _ in range(5):
+            now = self.activate_next_encounter(session)
+            now += 0.4
+            session.blink(now)
+            now = self.activate_next_encounter(session)
+            for _ in range(3):
                 now += 0.4
                 session.blink(now)
+            now = self.activate_next_encounter(session)
+            now += 0.4
+            session.blink(now)
+            self.activate_next_encounter(session)
 
         self.assertEqual(session.encounter.name, "The Fog")
         self.assertEqual(session.events_defeated, 7)
@@ -218,8 +260,12 @@ class GameSessionTests(unittest.TestCase):
         session = GameSession(0.0)
         session.round_number = 2
         with patch.object(app.random, "randrange", return_value=0):
-            for index in range(12):
-                session.blink(index * 0.4)
+            for _ in range(12):
+                if session.is_transitioning:
+                    now = self.activate_next_encounter(session)
+                else:
+                    now = session.encounter_started_at
+                session.blink(now + 0.4)
         self.assertEqual(session.angel_blinks, 12)
         self.assertEqual(session.result, "lost")
         self.assertIn("Weep", session.message)

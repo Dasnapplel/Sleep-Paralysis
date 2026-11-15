@@ -28,6 +28,8 @@ ENCOUNTER_SECONDS = 5.0
 STARE_SECONDS = 5.0
 CREEP_JUMPSCARE_MIN_SECONDS = 2.0
 CREEP_JUMPSCARE_MAX_SECONDS = 5.0
+INTER_EVENT_GAP_MIN_SECONDS = 1.0
+INTER_EVENT_GAP_MAX_SECONDS = 2.0
 FOG_CLOSE_DEADLINE_SECONDS = 2.0
 RANDOM_FOG_CLOSE_DEADLINE_SECONDS = 5.0
 CLOSED_EYES_SECONDS = 5.0
@@ -92,6 +94,8 @@ class GameSession:
         self.encounter_index = 0
         self.encounter_serial = 0
         self.round_number = 1
+        self.transition_background_index = 0
+        self.transition_until: Optional[float] = None
         self.encounter_started_at = now
         self.stare_started_at = now
         self.last_blink_at = float("-inf")
@@ -110,15 +114,23 @@ class GameSession:
     def encounter(self) -> Encounter:
         return ENCOUNTERS[self.encounter_index]
 
+    @property
+    def is_transitioning(self) -> bool:
+        return self.transition_until is not None
+
     def blink(self, now: float) -> None:
         if self.result is not None or now - self.last_blink_at < BLINK_COOLDOWN_SECONDS:
             return
 
+        encounter_active = self._activate_if_ready(now)
         self.last_blink_at = now
         self.angel_blinks += 1
         if self.angel_blinks >= ANGEL_BLINK_LIMIT:
             self.result = "lost"
             self.message = "Weep reached you. Press R to try again."
+            return
+
+        if not encounter_active:
             return
 
         if self.encounter.input_type == "blink":
@@ -141,6 +153,8 @@ class GameSession:
 
     def update(self, now: float, dt: float, eyes_closed: bool) -> None:
         if self.result is not None:
+            return
+        if not self._activate_if_ready(now):
             return
 
         if self.encounter.input_type == "blink":
@@ -184,21 +198,16 @@ class GameSession:
             if self.closed_eyes_progress >= CLOSED_EYES_SECONDS:
                 self._advance(now)
 
-    def _advance(self, now: float) -> None:
-        self.events_defeated += 1
-        if self.round_number == 1 and self.encounter_index + 1 < len(ENCOUNTERS):
-            self.encounter_index += 1
-        else:
-            self.round_number = 2
-            self.encounter_index = random.randrange(len(ENCOUNTERS))
-        self.encounter_serial += 1
+    def _activate_if_ready(self, now: float) -> bool:
+        if self.transition_until is None:
+            return True
+        if now < self.transition_until:
+            return False
+
+        self.transition_until = None
         self.encounter_started_at = now
         self.stare_started_at = now
-        self.blink_progress = 0
-        self.creep_jumpscared = False
-        self.creep_jumpscare_at = None
-        self.closed_eyes_started = False
-        self.closed_eyes_progress = 0.0
+        self.encounter_serial += 1
         if self.encounter.input_type in ("stare", "hold"):
             self.angel_blinks = 0
         if self.encounter.input_type == "stare":
@@ -207,6 +216,27 @@ class GameSession:
                 CREEP_JUMPSCARE_MAX_SECONDS,
             )
             self.creep_jumpscare_at = now + delay
+        return True
+
+    def _advance(self, now: float) -> None:
+        self.events_defeated += 1
+        self.transition_background_index = self.encounter_index
+        if self.round_number == 1 and self.encounter_index + 1 < len(ENCOUNTERS):
+            self.encounter_index += 1
+        else:
+            self.round_number = 2
+            self.encounter_index = random.randrange(len(ENCOUNTERS))
+        self.transition_until = now + random.uniform(
+            INTER_EVENT_GAP_MIN_SECONDS,
+            INTER_EVENT_GAP_MAX_SECONDS,
+        )
+        self.encounter_started_at = self.transition_until
+        self.stare_started_at = self.transition_until
+        self.blink_progress = 0
+        self.creep_jumpscared = False
+        self.creep_jumpscare_at = None
+        self.closed_eyes_started = False
+        self.closed_eyes_progress = 0.0
         self._set_encounter_message()
 
     def _set_encounter_message(self) -> None:
@@ -555,7 +585,7 @@ def main() -> None:
         draw_button(credits_back_button, "BACK")
 
     def draw_game_instructions() -> None:
-        if session.round_number != 1:
+        if session.round_number != 1 or session.is_transitioning:
             return
         message_box = pygame.Rect(110, HEIGHT - 78, WIDTH - 220, 52)
         pygame.draw.rect(screen, (8, 12, 22), message_box)
@@ -596,7 +626,11 @@ def main() -> None:
         draw_button(result_menu_button, "MAIN MENU")
 
     def draw_enemy(now: float) -> None:
-        if session.result == "won" or session.encounter.sprite is None:
+        if (
+            session.is_transitioning
+            or session.result == "won"
+            or session.encounter.sprite is None
+        ):
             return
         if session.encounter.input_type == "stare" and not session.creep_jumpscared:
             return
@@ -716,7 +750,11 @@ def main() -> None:
             screen_state = "result"
             game_time_played = max(0.0, now - game_started_at)
 
-        if screen_state == "game" and session.encounter_serial != previous_encounter_serial:
+        if (
+            screen_state == "game"
+            and not session.is_transitioning
+            and session.encounter_serial != previous_encounter_serial
+        ):
             if sound_effects is not None and session.encounter.input_type == "stare":
                 sound_effects.door_open.play()
             elif sound_effects is not None and session.encounter.input_type == "hold":
@@ -737,11 +775,21 @@ def main() -> None:
             if session.result == "won":
                 screen.fill(WHITE)
             else:
-                background, background_offset = backgrounds[session.encounter.background]
+                background_encounter = (
+                    ENCOUNTERS[session.transition_background_index]
+                    if session.is_transitioning
+                    else session.encounter
+                )
+                background, background_offset = backgrounds[
+                    background_encounter.background
+                ]
                 screen.blit(background, background_offset)
                 draw_enemy(now)
                 draw_stone_angel()
-                if session.encounter.input_type == "hold":
+                if (
+                    session.encounter.input_type == "hold"
+                    and not session.is_transitioning
+                ):
                     deadline_progress = min(
                         1.0,
                         max(
