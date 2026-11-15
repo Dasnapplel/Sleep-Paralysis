@@ -29,8 +29,9 @@ STARE_SECONDS = 5.0
 CREEP_JUMPSCARE_MIN_SECONDS = 2.0
 CREEP_JUMPSCARE_MAX_SECONDS = 5.0
 FOG_CLOSE_DEADLINE_SECONDS = 2.0
+RANDOM_FOG_CLOSE_DEADLINE_SECONDS = 5.0
 CLOSED_EYES_SECONDS = 5.0
-ANGEL_BLINK_LIMIT = 20
+ANGEL_BLINK_LIMIT = 12
 SCORE_PER_SECOND = 10
 SCORE_PER_EVENT = 1000
 SOUND_SAMPLE_RATE = 22050
@@ -155,12 +156,17 @@ class GameSession:
             elif now - self.stare_started_at >= STARE_SECONDS:
                 self._advance(now)
         elif self.encounter.input_type == "hold":
+            close_deadline = (
+                FOG_CLOSE_DEADLINE_SECONDS
+                if self.round_number == 1
+                else RANDOM_FOG_CLOSE_DEADLINE_SECONDS
+            )
             close_deadline_passed = (
-                now - self.encounter_started_at > FOG_CLOSE_DEADLINE_SECONDS
+                now - self.encounter_started_at > close_deadline
             )
             if not self.closed_eyes_started and close_deadline_passed:
                 self.result = "lost"
-                self.message = "The fog caught you. Press R to try again."
+                self.message = "The Fog caught you. Press R to try again."
                 return
             if eyes_closed:
                 self.closed_eyes_started = True
@@ -170,7 +176,10 @@ class GameSession:
                 )
             elif self.closed_eyes_started:
                 self.result = "lost"
-                self.message = "You opened your eyes too soon. Press R to try again."
+                self.message = (
+                    "The Fog caught you when you opened your eyes too soon. "
+                    "Press R to try again."
+                )
                 return
             if self.closed_eyes_progress >= CLOSED_EYES_SECONDS:
                 self._advance(now)
@@ -211,7 +220,7 @@ class GameSession:
                 f"{'s' if self.encounter.blink_goal != 1 else ''} to banish it."
             )
         elif self.encounter.input_type == "stare":
-            self.message = "The door opens. Creep will strike in 2–5 seconds."
+            self.message = "The door opens... Creep will strike soon."
         else:
             self.message = (
                 "The Fog is coming! Close your eyes within 2 seconds, "
@@ -459,8 +468,6 @@ def main() -> None:
     result_menu_button = pygame.Rect(665, 480, 230, 58)
     menu_overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
     menu_overlay.fill((0, 0, 0, 170))
-    hud_panel = pygame.Surface((WIDTH, 104), pygame.SRCALPHA)
-    hud_panel.fill((8, 12, 22, 220))
     fog_overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
     creep_flash_overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
 
@@ -547,104 +554,14 @@ def main() -> None:
             screen.blit(text, text.get_rect(center=(WIDTH // 2, 270 + index * 64)))
         draw_button(credits_back_button, "BACK")
 
-    def draw_game_hud(now: float) -> None:
-        screen.blit(hud_panel, (0, 0))
-        if session.round_number == 1:
-            encounter_label = (
-                f"{session.encounter.name.upper()}  "
-                f"{session.encounter_index + 1:02d}/{len(ENCOUNTERS)}"
-            )
-        else:
-            encounter_label = (
-                f"{session.encounter.name.upper()}  "
-                f"#{session.events_defeated + 1:02d}"
-            )
-        screen.blit(font.render(encounter_label, True, PALE), (28, 20))
-        weep_label = f"WEEP  {session.angel_blinks:02d}/{ANGEL_BLINK_LIMIT}"
-        screen.blit(
-            small_font.render(
-                weep_label,
-                True,
-                RED if session.angel_blinks >= 15 else AMBER,
-            ),
-            (360, 24),
-        )
-        input_label = small_font.render(f"INPUT  {input_mode}", True, GREEN if input_mode == "SIMULATOR" else AMBER)
-        screen.blit(input_label, (600, 24))
-        show_instructions = session.round_number == 1
-
-        if session.encounter.input_type == "blink":
-            remaining = max(
-                0.0,
-                ENCOUNTER_SECONDS - (now - session.encounter_started_at),
-            )
-            progress_label = (
-                f"TIME TO ACT {remaining:0.1f}s"
-                if show_instructions
-                else f"THREAT {remaining:0.1f}s"
-            )
-            progress = 1.0 - remaining / ENCOUNTER_SECONDS
-            progress_color = AMBER if remaining > 2.0 else RED
-        elif (
-            session.encounter.input_type == "stare"
-            and not session.creep_jumpscared
-            and session.creep_jumpscare_at is not None
-        ):
-            delay = session.creep_jumpscare_at - session.encounter_started_at
-            remaining = max(0.0, session.creep_jumpscare_at - now)
-            progress_label = (
-                f"CREEP IN {remaining:0.1f}s"
-                if show_instructions
-                else f"CREEP {remaining:0.1f}s"
-            )
-            progress = 1.0 - remaining / delay
-            progress_color = AMBER if remaining > 1.0 else RED
-        elif session.encounter.input_type == "stare":
-            stared = min(STARE_SECONDS, now - session.stare_started_at)
-            progress_label = (
-                f"NO BLINK {stared:0.1f}/{STARE_SECONDS:.0f}s"
-                if show_instructions
-                else f"STARE {stared:0.1f}/{STARE_SECONDS:.0f}s"
-            )
-            progress = stared / STARE_SECONDS
-            progress_color = GREEN
-        elif not session.closed_eyes_started:
-            remaining = max(
-                0.0,
-                FOG_CLOSE_DEADLINE_SECONDS - (now - session.encounter_started_at),
-            )
-            progress_label = (
-                f"CLOSE EYES {remaining:0.1f}s"
-                if show_instructions
-                else f"FOG IN {remaining:0.1f}s"
-            )
-            progress = 1.0 - remaining / FOG_CLOSE_DEADLINE_SECONDS
-            progress_color = AMBER if remaining > 1.0 else RED
-        else:
-            progress_label = (
-                f"HOLD CLOSED {session.closed_eyes_progress:0.1f}/"
-                f"{CLOSED_EYES_SECONDS:.0f}s"
-                if show_instructions
-                else f"FOG {session.closed_eyes_progress:0.1f}/"
-                f"{CLOSED_EYES_SECONDS:.0f}s"
-            )
-            progress = session.closed_eyes_progress / CLOSED_EYES_SECONDS
-            progress_color = GREEN
-
-        screen.blit(small_font.render(progress_label, True, progress_color), (980, 20))
-        pygame.draw.rect(screen, (46, 49, 62), pygame.Rect(980, 48, 260, 14))
-        pygame.draw.rect(
-            screen,
-            progress_color,
-            pygame.Rect(980, 48, int(260 * max(0.0, min(progress, 1.0))), 14),
-        )
-
-        if show_instructions:
-            message_box = pygame.Rect(110, HEIGHT - 78, WIDTH - 220, 52)
-            pygame.draw.rect(screen, (8, 12, 22), message_box)
-            pygame.draw.rect(screen, (123, 137, 151), message_box, 2)
-            text = font.render(session.message, True, PALE)
-            screen.blit(text, text.get_rect(center=message_box.center))
+    def draw_game_instructions() -> None:
+        if session.round_number != 1:
+            return
+        message_box = pygame.Rect(110, HEIGHT - 78, WIDTH - 220, 52)
+        pygame.draw.rect(screen, (8, 12, 22), message_box)
+        pygame.draw.rect(screen, (123, 137, 151), message_box, 2)
+        text = font.render(session.message, True, PALE)
+        screen.blit(text, text.get_rect(center=message_box.center))
 
     def format_play_time(seconds: float) -> str:
         minutes, remaining_seconds = divmod(max(0, int(seconds)), 60)
@@ -657,6 +574,9 @@ def main() -> None:
         )
         title = screen_title_font.render(result_title, True, PALE)
         screen.blit(title, title.get_rect(center=(WIDTH // 2, 235)))
+        if session.result == "lost":
+            reason = small_font.render(session.message, True, PALE)
+            screen.blit(reason, reason.get_rect(center=(WIDTH // 2, 280)))
         score = calculate_score(game_time_played, session.events_defeated)
         score_text = section_title_font.render(f"SCORE {score:,}", True, PALE)
         screen.blit(score_text, score_text.get_rect(center=(WIDTH // 2, 325)))
@@ -839,7 +759,7 @@ def main() -> None:
                     )
                     fog_overlay.fill((WHITE[0], WHITE[1], WHITE[2], alpha))
                     screen.blit(fog_overlay, (0, 0))
-            draw_game_hud(now)
+            draw_game_instructions()
         pygame.display.flip()
 
     ble_stop.set()

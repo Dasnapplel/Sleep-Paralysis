@@ -99,6 +99,7 @@ class GameSessionTests(unittest.TestCase):
         self.assertIsNone(session.result)
         session.update(5.01, 0.05, False)
         self.assertEqual(session.result, "lost")
+        self.assertIn("Meatball", session.message)
 
     def test_creep_jumpscare_waits_two_to_five_seconds(self) -> None:
         session = self.enter_creep()
@@ -116,6 +117,7 @@ class GameSessionTests(unittest.TestCase):
         session.update(session.creep_jumpscare_at, 0.01, False)
         session.blink(session.stare_started_at + 0.4)
         self.assertEqual(session.result, "lost")
+        self.assertIn("Creep", session.message)
 
     def test_creep_disappears_after_five_seconds_without_blinking(self) -> None:
         session = self.enter_creep()
@@ -141,6 +143,24 @@ class GameSessionTests(unittest.TestCase):
         session = self.enter_fog()
         session.update(session.encounter_started_at + 2.01, 0.01, False)
         self.assertEqual(session.result, "lost")
+        self.assertIn("Fog", session.message)
+
+    def test_random_fog_gives_five_seconds_to_close_eyes(self) -> None:
+        session = self.enter_fog()
+        tutorial_fog_started_at = session.encounter_started_at
+        with patch.object(app.random, "randrange", return_value=3):
+            session.update(tutorial_fog_started_at + 1.0, 1.0, True)
+            for elapsed in range(2, 6):
+                session.update(tutorial_fog_started_at + elapsed, 1.0, True)
+
+        self.assertEqual(session.round_number, 2)
+        self.assertEqual(session.encounter.name, "The Fog")
+        random_fog_started_at = session.encounter_started_at
+        session.update(random_fog_started_at + 2.01, 0.01, False)
+        self.assertIsNone(session.result)
+        session.update(random_fog_started_at + 5.01, 0.01, False)
+        self.assertEqual(session.result, "lost")
+        self.assertIn("Fog", session.message)
 
     def test_opening_eyes_before_five_seconds_causes_a_loss(self) -> None:
         session = self.enter_fog()
@@ -148,6 +168,7 @@ class GameSessionTests(unittest.TestCase):
         session.update(fog_started_at + 1.0, 1.0, True)
         session.update(fog_started_at + 1.1, 0.1, False)
         self.assertEqual(session.result, "lost")
+        self.assertIn("Fog", session.message)
 
     def test_first_round_fog_advances_to_the_random_phase(self) -> None:
         session = self.enter_fog()
@@ -193,14 +214,15 @@ class GameSessionTests(unittest.TestCase):
         self.assertGreater(calculate_score(31.0, 2), calculate_score(30.0, 2))
         self.assertGreater(calculate_score(30.0, 3), calculate_score(30.0, 2))
 
-    def test_twentieth_blink_causes_the_angel_to_catch_the_player(self) -> None:
+    def test_twelfth_blink_causes_the_angel_to_catch_the_player(self) -> None:
         session = GameSession(0.0)
         session.round_number = 2
         with patch.object(app.random, "randrange", return_value=0):
-            for index in range(20):
+            for index in range(12):
                 session.blink(index * 0.4)
-        self.assertEqual(session.angel_blinks, 20)
+        self.assertEqual(session.angel_blinks, 12)
         self.assertEqual(session.result, "lost")
+        self.assertIn("Weep", session.message)
 
 
 if __name__ == "__main__":
