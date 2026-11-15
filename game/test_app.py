@@ -1,8 +1,68 @@
+import asyncio
+import queue
+import sys
+import threading
 import unittest
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import app
 from app import GameSession, calculate_score
+
+
+class BleStreamTests(unittest.TestCase):
+    def test_octopus_connection_uses_timeout_and_enables_notifications(self) -> None:
+        device = SimpleNamespace(name="Octopus-16-001D", address="00:11:22:33:44:55")
+        advertisement = SimpleNamespace(
+            service_uuids=[],
+            local_name="Octopus-16-001D",
+        )
+        client_state = {}
+
+        class FakeScanner:
+            @staticmethod
+            async def find_device_by_filter(match_filter, timeout):
+                self.assertEqual(timeout, 10.0)
+                self.assertTrue(match_filter(device, advertisement))
+                return device
+
+        class FakeClient:
+            is_connected = True
+
+            def __init__(self, found_device, timeout):
+                client_state["device"] = found_device
+                client_state["timeout"] = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _traceback):
+                return None
+
+            async def start_notify(self, characteristic, _callback):
+                client_state["characteristic"] = characteristic
+
+            async def stop_notify(self, characteristic):
+                client_state["stopped"] = characteristic
+
+        fake_bleak = ModuleType("bleak")
+        fake_bleak.BleakClient = FakeClient
+        fake_bleak.BleakScanner = FakeScanner
+        stop_event = threading.Event()
+        stop_event.set()
+        ui_events = queue.Queue()
+
+        with patch.dict(sys.modules, {"bleak": fake_bleak}):
+            asyncio.run(app.stream_ble(stop_event, ui_events))
+
+        self.assertEqual(client_state["device"], device)
+        self.assertEqual(client_state["timeout"], 30.0)
+        self.assertEqual(client_state["characteristic"], app.NOTIFY_CHAR_UUID)
+        self.assertEqual(client_state["stopped"], app.NOTIFY_CHAR_UUID)
+        event_types = []
+        while not ui_events.empty():
+            event_types.append(ui_events.get_nowait()[0])
+        self.assertEqual(event_types, ["status", "status", "status", "connected"])
 
 
 class GameSessionTests(unittest.TestCase):

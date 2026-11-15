@@ -338,8 +338,14 @@ async def stream_ble(stop_event: threading.Event, ui_events: queue.Queue) -> Non
     if device is None:
         raise RuntimeError("No Octopus 16 found. Check power and Bluetooth, then try again.")
 
+    ui_events.put(("status", f"Found {device.name or 'Octopus 16'}; connecting..."))
     last_blink_time = 0.0
-    async with BleakClient(device) as client:
+    async with BleakClient(
+        device,
+        timeout=30.0,
+    ) as client:
+        ui_events.put(("status", "Connected; enabling blink notifications..."))
+
         def on_notification(_sender, data: bytearray) -> None:
             nonlocal last_blink_time
             for offset in range(0, len(data) - PACKET_SIZE + 1, PACKET_SIZE):
@@ -471,8 +477,17 @@ def main() -> None:
             try:
                 asyncio.run(stream_ble(ble_stop, ui_events))
                 ui_events.put(("status", "BLE disconnected. Simulator is still available."))
+            except TimeoutError:
+                ui_events.put(
+                    (
+                        "error",
+                        "BLE connection timed out. Check that the Octopus is powered, "
+                        "nearby, and not connected to another app.",
+                    )
+                )
             except Exception as error:
-                ui_events.put(("error", str(error)))
+                detail = str(error).strip() or type(error).__name__
+                ui_events.put(("error", detail))
 
         ble_thread = threading.Thread(target=run_connection, daemon=True)
         ble_thread.start()
