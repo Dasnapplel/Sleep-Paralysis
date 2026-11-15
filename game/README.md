@@ -51,16 +51,16 @@ npm start
    * 🔌 **Have the board?** Open **`http://localhost:3000`** and click **Connect Octopus 16 (BLE)** → select `Octopus-16-XXXX`.
    * 💻 **No hardware yet / coding while a teammate wears it?** Open **`http://localhost:3000/?sim=1`** to launch the **250 Hz Simulator** immediately (press `Space` = Eye Blink, `A` = Alpha Wave Boost, `C` = Jaw Clench).
 
-## 🎮 Pixel-Night Watch (Pygame)
+## 🎮 Night Watch (Pygame)
 
-The starter game is [`app.py`](./app.py), with the pixel bedroom background in [`assets/child-bedroom-pixel.png`](./assets/child-bedroom-pixel.png). The character rests on the bed while the closet shadow approaches; blinks flare the nightlight and push it back.
+The starter game is [`app.py`](./app.py), a blink-controlled sleep-paralysis encounter sequence. Blink once to banish the default demon and three times to banish the boss; each must be cleared within five seconds. The pale grin appears against the open-door background and vanishes after five uninterrupted seconds without a blink. In the open-window fog scene, hold **Space** for five seconds to close your eyes and clear the screen. Every blink moves the stone angel closer; the 20th blink ends the run. The two blink-to-banish demons cause a loss if they remain for more than five seconds.
 
 ```bash
 pip install -r requirements.txt
 python app.py
 ```
 
-Click **Simulator Mode** and press **Space** to test, or click **Connect Octopus 16 (BLE)** to use the board. The game also accepts `S` for simulator, `B` for BLE, `D` to disconnect, `R` to restart, and `Esc` to quit. BLE blinking uses a simple 115 µV peak trigger; movement or other signal artifacts can cause false triggers.
+Click **Simulator Mode** and press **Space** to blink, or click **Connect Octopus 16 (BLE)** to use the board. Hold **Space** during the fog encounter (also works while BLE is connected); the current BLE input detects discrete blinks, not sustained eye closure. The game also accepts `S` for simulator, `B` for BLE, `D` to disconnect, `R` to restart, and `Esc` to quit. BLE blinking uses a simple 115 µV peak trigger; movement or other signal artifacts can cause false triggers.
 
 ---
 

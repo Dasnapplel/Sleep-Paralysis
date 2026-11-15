@@ -1,12 +1,13 @@
 import asyncio
-import math
+from bisect import bisect_right
 import queue
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import pygame
+from PIL import Image
 
 SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 NOTIFY_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
@@ -20,15 +21,180 @@ BLINK_COOLDOWN_SECONDS = 0.35
 
 WIDTH = 1280
 HEIGHT = 720
-SURVIVE_SECONDS = 75.0
-THREAT_GROWTH_PER_SECOND = 0.012
-BLINK_COOLDOWN_GAME_SECONDS = 1.2
+ENCOUNTER_SECONDS = 5.0
+STARE_SECONDS = 5.0
+CLOSED_EYES_SECONDS = 5.0
+ANGEL_BLINK_LIMIT = 20
 
-INK = (14, 20, 35)
 PALE = (235, 231, 221)
 AMBER = (255, 190, 104)
 RED = (228, 107, 111)
 GREEN = (158, 220, 174)
+WHITE = (255, 255, 255)
+
+
+class Encounter(NamedTuple):
+    name: str
+    background: str
+    sprite: Optional[str]
+    input_type: str
+    blink_goal: int = 0
+
+
+ENCOUNTERS = (
+    Encounter(
+        "The Visitor",
+        "Moonlit Space-Themed Bedroom.png",
+        "demon_transparent.gif",
+        "blink",
+        1,
+    ),
+    Encounter(
+        "The Boss",
+        "Moonlit Space-Themed Bedroom.png",
+        "boss_demon.gif",
+        "blink",
+        3,
+    ),
+    Encounter(
+        "The Pale Grin",
+        "Moonlit Bedroom and Open Door.png",
+        "pale_grin_demon_still_face.gif",
+        "stare",
+    ),
+    Encounter(
+        "The Fog",
+        "Moonlit Starry Bedroom with Open Window.png",
+        None,
+        "hold",
+    ),
+)
+
+
+class GameSession:
+    def __init__(self, now: float) -> None:
+        self.encounter_index = 0
+        self.encounter_started_at = now
+        self.stare_started_at = now
+        self.last_blink_at = float("-inf")
+        self.blink_progress = 0
+        self.angel_blinks = 0
+        self.closed_eyes_progress = 0.0
+        self.result: Optional[str] = None
+        self.message = ""
+        self._set_encounter_message()
+
+    @property
+    def encounter(self) -> Encounter:
+        return ENCOUNTERS[self.encounter_index]
+
+    def blink(self, now: float) -> None:
+        if self.result is not None or now - self.last_blink_at < BLINK_COOLDOWN_SECONDS:
+            return
+
+        self.last_blink_at = now
+        self.angel_blinks += 1
+        if self.angel_blinks >= ANGEL_BLINK_LIMIT:
+            self.result = "lost"
+            self.message = "The stone angel reached you. Press R to try again."
+            return
+
+        if self.encounter.input_type == "blink":
+            self.blink_progress += 1
+            if self.blink_progress >= self.encounter.blink_goal:
+                self._advance(now)
+            else:
+                self.message = (
+                    f"{self.encounter.name}: {self.blink_progress}/"
+                    f"{self.encounter.blink_goal} blinks. The angel moves closer."
+                )
+        elif self.encounter.input_type == "stare":
+            self.stare_started_at = now
+            self.message = "You blinked. Keep staring at the grin for 5 seconds."
+        else:
+            self.message = "The angel moves closer. Keep holding SPACE to close your eyes."
+
+    def update(self, now: float, dt: float, eyes_closed: bool) -> None:
+        if self.result is not None:
+            return
+
+        if self.encounter.input_type == "blink":
+            if now - self.encounter_started_at > ENCOUNTER_SECONDS:
+                self.result = "lost"
+                self.message = f"{self.encounter.name} stayed too long. Press R to try again."
+        elif self.encounter.input_type == "stare":
+            if now - self.stare_started_at >= STARE_SECONDS:
+                self._advance(now)
+        elif self.encounter.input_type == "hold":
+            if eyes_closed:
+                self.closed_eyes_progress = min(
+                    CLOSED_EYES_SECONDS,
+                    self.closed_eyes_progress + dt,
+                )
+            else:
+                self.closed_eyes_progress = 0.0
+            if self.closed_eyes_progress >= CLOSED_EYES_SECONDS:
+                self.result = "won"
+                self.message = "Dawn breaks. The fog and every demon disappear."
+
+    def _advance(self, now: float) -> None:
+        if self.encounter_index + 1 >= len(ENCOUNTERS):
+            self.result = "won"
+            self.message = "Dawn breaks. You made it through the night."
+            return
+
+        self.encounter_index += 1
+        self.encounter_started_at = now
+        self.stare_started_at = now
+        self.blink_progress = 0
+        self.closed_eyes_progress = 0.0
+        self._set_encounter_message()
+
+    def _set_encounter_message(self) -> None:
+        if self.encounter.input_type == "blink":
+            self.message = (
+                f"{self.encounter.name} is here. Blink "
+                f"{self.encounter.blink_goal} time"
+                f"{'s' if self.encounter.blink_goal != 1 else ''} to banish it."
+            )
+        elif self.encounter.input_type == "stare":
+            self.message = "The pale grin is watching. Do not blink for 5 seconds."
+        else:
+            self.message = "Fog fills the window. Hold SPACE to close your eyes for 5 seconds."
+
+
+class AnimatedSprite:
+    def __init__(self, path: Path, size: tuple[int, int]) -> None:
+        self.frames: list[pygame.Surface] = []
+        durations: list[int] = []
+        with Image.open(path) as image:
+            for index in range(image.n_frames):
+                image.seek(index)
+                duration = max(20, int(image.info.get("duration", 50)))
+                if index % 2 == 0:
+                    frame = image.convert("RGBA")
+                    frame.thumbnail(size, Image.Resampling.LANCZOS)
+                    surface = pygame.image.fromstring(
+                        frame.tobytes(),
+                        frame.size,
+                        "RGBA",
+                    ).convert_alpha()
+                    self.frames.append(surface)
+                    durations.append(duration)
+                else:
+                    durations[-1] += duration
+
+        self.frame_boundaries: list[int] = []
+        total_duration = 0
+        for duration in durations:
+            total_duration += duration
+            self.frame_boundaries.append(total_duration)
+        self.total_duration = total_duration
+        self.started_at = time.monotonic()
+
+    def frame_at(self, now: float) -> pygame.Surface:
+        elapsed_ms = int((now - self.started_at) * 1000) % self.total_duration
+        return self.frames[bisect_right(self.frame_boundaries, elapsed_ms)]
 
 
 def decode_octopus16_packet(packet: bytes) -> Optional[list[float]]:
@@ -91,19 +257,44 @@ async def stream_ble(stop_event: threading.Event, ui_events: queue.Queue) -> Non
 def main() -> None:
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("Nightlight — A PiEEG Blink-Controlled Horror Game")
+    pygame.display.set_caption("Night Watch — A PiEEG Blink-Controlled Horror Game")
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("consolas", 18)
     small_font = pygame.font.SysFont("consolas", 14)
     title_font = pygame.font.SysFont("consolas", 30, bold=True)
+    assets_dir = Path(__file__).resolve().parent / "assets"
 
-    asset_path = Path(__file__).resolve().parent / "assets" / "child-bedroom-pixel.png"
-    background_image = pygame.image.load(str(asset_path)).convert()
-    image_width, image_height = background_image.get_size()
-    scale = max(WIDTH / image_width, HEIGHT / image_height)
-    scaled_size = (round(image_width * scale), round(image_height * scale))
-    background_image = pygame.transform.scale(background_image, scaled_size)
-    background_offset = ((WIDTH - scaled_size[0]) // 2, (HEIGHT - scaled_size[1]) // 2)
+    def load_background(filename: str) -> tuple[pygame.Surface, tuple[int, int]]:
+        image = pygame.image.load(str(assets_dir / filename)).convert()
+        image_width, image_height = image.get_size()
+        scale = max(WIDTH / image_width, HEIGHT / image_height)
+        scaled_size = (round(image_width * scale), round(image_height * scale))
+        image = pygame.transform.smoothscale(image, scaled_size)
+        offset = ((WIDTH - scaled_size[0]) // 2, (HEIGHT - scaled_size[1]) // 2)
+        return image, offset
+
+    backgrounds = {
+        encounter.background: load_background(encounter.background)
+        for encounter in ENCOUNTERS
+    }
+    sprites = {
+        "demon_transparent.gif": AnimatedSprite(
+            assets_dir / "demon_transparent.gif",
+            (340, 340),
+        ),
+        "boss_demon.gif": AnimatedSprite(
+            assets_dir / "boss_demon.gif",
+            (410, 410),
+        ),
+        "pale_grin_demon_still_face.gif": AnimatedSprite(
+            assets_dir / "pale_grin_demon_still_face.gif",
+            (390, 390),
+        ),
+    }
+    stone_angel = pygame.image.load(
+        str(assets_dir / "stone_angel_animatronic.png")
+    ).convert_alpha()
+    angel_frames: dict[tuple[int, int], pygame.Surface] = {}
 
     ui_events: queue.Queue = queue.Queue()
     ble_stop = threading.Event()
@@ -111,22 +302,16 @@ def main() -> None:
     running = True
     input_mode = "SIMULATOR"
     connection_status = "Simulator ready — SPACE = blink"
-    threat = 0.12
-    elapsed = 0.0
-    last_action_time = -10.0
-    flash_until = 0.0
-    message = "You are safe in bed. Keep the closet light away."
-    message_until = 5.0
-    game_result: Optional[str] = None
+    now = time.monotonic()
+    session = GameSession(now)
+    eyes_closed_held = False
 
     connect_button = pygame.Rect(28, 74, 236, 42)
     simulator_button = pygame.Rect(276, 74, 210, 42)
     disconnect_button = pygame.Rect(498, 74, 146, 42)
-    shadow = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
     hud_panel = pygame.Surface((WIDTH, 136), pygame.SRCALPHA)
     hud_panel.fill((8, 12, 22, 220))
-    flash_overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-    flash_overlay.fill((255, 211, 135, 52))
+    fog_overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
 
     def start_ble() -> None:
         nonlocal ble_thread, input_mode, connection_status
@@ -153,19 +338,6 @@ def main() -> None:
         input_mode = "SIMULATOR"
         connection_status = "Simulator ready — SPACE = blink"
 
-    def trigger_blink(now: float, peak_uv: Optional[float] = None) -> None:
-        nonlocal threat, last_action_time, flash_until, message, message_until
-        if game_result is not None or now - last_action_time < BLINK_COOLDOWN_GAME_SECONDS:
-            return
-        last_action_time = now
-        threat = max(0.0, threat - 0.24)
-        flash_until = now + 0.8
-        if peak_uv is None:
-            message = "A blink! The nightlight pushes the shadow back."
-        else:
-            message = f"Blink detected ({peak_uv:.0f} µV). The nightlight flares!"
-        message_until = now + 2.8
-
     def draw_button(rect: pygame.Rect, label: str, selected: bool = False) -> None:
         fill = (64, 88, 112) if selected else (31, 42, 60)
         pygame.draw.rect(screen, fill, rect)
@@ -173,43 +345,17 @@ def main() -> None:
         text = small_font.render(label, True, PALE)
         screen.blit(text, text.get_rect(center=rect.center))
 
-    def draw_character(now: float) -> None:
-        bob = int(math.sin(now * 2.0) * 2)
-        pillow = pygame.Rect(546, 564 + bob, 190, 64)
-        pygame.draw.rect(screen, (113, 127, 145), pillow)
-        pygame.draw.rect(screen, (190, 192, 190), pygame.Rect(558, 573 + bob, 166, 44))
-
-        pygame.draw.rect(screen, (31, 28, 39), pygame.Rect(602, 548 + bob, 76, 80))
-        pygame.draw.rect(screen, (215, 164, 133), pygame.Rect(612, 562 + bob, 56, 54))
-        pygame.draw.rect(screen, (31, 28, 39), pygame.Rect(602, 548 + bob, 76, 20))
-        pygame.draw.rect(screen, (31, 28, 39), pygame.Rect(596, 556 + bob, 16, 34))
-        pygame.draw.rect(screen, (31, 28, 39), pygame.Rect(668, 556 + bob, 16, 34))
-        pygame.draw.rect(screen, (80, 57, 55), pygame.Rect(623, 588 + bob, 10, 4))
-        pygame.draw.rect(screen, (80, 57, 55), pygame.Rect(649, 588 + bob, 10, 4))
-        pygame.draw.rect(screen, (190, 126, 112), pygame.Rect(636, 600 + bob, 9, 5))
-
-        blanket = [(478, 642 + bob), (544, 616 + bob), (736, 616 + bob),
-                   (802, 642 + bob), (842, 720), (438, 720)]
-        pygame.draw.polygon(screen, (64, 79, 111), blanket)
-        pygame.draw.polygon(screen, (104, 119, 149), blanket, 4)
-        for x, y in ((526, 668), (728, 671), (618, 696)):
-            pygame.draw.rect(screen, (148, 153, 170), pygame.Rect(x, y, 12, 8))
-            pygame.draw.rect(screen, (148, 153, 170), pygame.Rect(x + 2, y - 2, 8, 12))
-
-    def draw_shadow() -> None:
-        alpha = min(210, int(40 + threat * 160))
-        shadow.fill((0, 0, 0, 0))
-        color = (5, 6, 14, alpha)
-        pygame.draw.rect(shadow, color, pygame.Rect(925, 254, 94, 210))
-        pygame.draw.rect(shadow, color, pygame.Rect(939, 220, 66, 58))
-        pygame.draw.rect(shadow, color, pygame.Rect(907, 286, 22, 126))
-        pygame.draw.rect(shadow, color, pygame.Rect(1015, 280, 20, 132))
-        screen.blit(shadow, (0, 0))
-
     def draw_hud(now: float) -> None:
         screen.blit(hud_panel, (0, 0))
-        screen.blit(title_font.render("NIGHTLIGHT", True, PALE), (28, 20))
-        screen.blit(small_font.render("A tiny pixel-horror game controlled by blinks", True, (170, 182, 191)), (30, 50))
+        screen.blit(title_font.render("NIGHT WATCH", True, PALE), (28, 20))
+        screen.blit(
+            small_font.render(
+                "Blink to fight back. Don't blink at the grin. Watch the angel.",
+                True,
+                (170, 182, 191),
+            ),
+            (30, 50),
+        )
 
         draw_button(connect_button, "Connect Octopus 16 (BLE)", input_mode.startswith("BLE"))
         draw_button(simulator_button, "Simulator Mode  [Space]", input_mode == "SIMULATOR")
@@ -217,40 +363,95 @@ def main() -> None:
 
         status_color = GREEN if input_mode == "SIMULATOR" else AMBER
         screen.blit(small_font.render(connection_status, True, status_color), (664, 85))
-        remaining = max(0, int(SURVIVE_SECONDS - elapsed))
-        screen.blit(font.render(f"UNTIL DAWN  {remaining:02d}s", True, PALE), (1000, 22))
-        screen.blit(small_font.render(f"THREAT  {int(threat * 100)}%", True, RED if threat > 0.65 else AMBER), (1000, 52))
+
+        if session.result == "won":
+            encounter_label = "NIGHT SURVIVED"
+            progress_label = "ALL DEMONS GONE"
+            progress = 1.0
+            progress_color = GREEN
+        elif session.result == "lost":
+            encounter_label = "GAME OVER"
+            progress_label = f"ANGEL BLINKS {session.angel_blinks}/{ANGEL_BLINK_LIMIT}"
+            progress = min(1.0, session.angel_blinks / ANGEL_BLINK_LIMIT)
+            progress_color = RED
+        else:
+            encounter_label = (
+                f"ENCOUNTER {session.encounter_index + 1:02d}/{len(ENCOUNTERS)}"
+            )
+            if session.encounter.input_type == "blink":
+                remaining = max(
+                    0.0,
+                    ENCOUNTER_SECONDS - (now - session.encounter_started_at),
+                )
+                progress_label = f"TIME TO ACT {remaining:0.1f}s"
+                progress = 1.0 - remaining / ENCOUNTER_SECONDS
+                progress_color = AMBER if remaining > 2.0 else RED
+            elif session.encounter.input_type == "stare":
+                stared = min(STARE_SECONDS, now - session.stare_started_at)
+                progress_label = f"NO BLINK {stared:0.1f}/{STARE_SECONDS:.0f}s"
+                progress = stared / STARE_SECONDS
+                progress_color = GREEN
+            else:
+                progress_label = (
+                    f"EYES CLOSED {session.closed_eyes_progress:0.1f}/"
+                    f"{CLOSED_EYES_SECONDS:.0f}s"
+                )
+                progress = session.closed_eyes_progress / CLOSED_EYES_SECONDS
+                progress_color = GREEN
+
+        screen.blit(font.render(encounter_label, True, PALE), (1000, 18))
+        angel_label = f"ANGEL  {session.angel_blinks:02d}/{ANGEL_BLINK_LIMIT}"
+        screen.blit(
+            small_font.render(angel_label, True, RED if session.angel_blinks >= 15 else AMBER),
+            (1000, 48),
+        )
+        screen.blit(small_font.render(progress_label, True, progress_color), (1000, 66))
         pygame.draw.rect(screen, (46, 49, 62), pygame.Rect(1000, 76, 240, 14))
-        pygame.draw.rect(screen, RED, pygame.Rect(1000, 76, int(240 * threat), 14))
+        pygame.draw.rect(
+            screen,
+            progress_color,
+            pygame.Rect(1000, 76, int(240 * max(0.0, min(progress, 1.0))), 14),
+        )
 
-        if now < message_until or game_result is not None:
-            label = message
-            if game_result == "lost":
-                label = "The shadow reached the bed. Press R to try again."
-            elif game_result == "won":
-                label = "Morning! You made it through the night. Press R to play again."
-            box = pygame.Rect(250, 470, 780, 48)
-            pygame.draw.rect(screen, (8, 12, 22), box)
-            pygame.draw.rect(screen, (123, 137, 151), box, 2)
-            text = font.render(label, True, PALE)
-            screen.blit(text, text.get_rect(center=box.center))
+        message_box = pygame.Rect(110, HEIGHT - 78, WIDTH - 220, 52)
+        pygame.draw.rect(screen, (8, 12, 22), message_box)
+        pygame.draw.rect(screen, (123, 137, 151), message_box, 2)
+        message = session.message
+        if session.result is not None:
+            message += "  Press R to play again."
+        text = font.render(message, True, PALE)
+        screen.blit(text, text.get_rect(center=message_box.center))
 
-        if now < flash_until:
-            screen.blit(flash_overlay, (0, 0))
+    def draw_enemy(now: float) -> None:
+        if session.result == "won" or session.encounter.sprite is None:
+            return
+        sprite = sprites[session.encounter.sprite].frame_at(now)
+        rect = sprite.get_rect(center=(WIDTH // 2, 400))
+        screen.blit(sprite, rect)
 
-    def reset_game() -> None:
-        nonlocal threat, elapsed, last_action_time, flash_until, message, message_until, game_result
-        threat = 0.12
-        elapsed = 0.0
-        last_action_time = -10.0
-        flash_until = 0.0
-        message = "You are safe in bed. Keep the closet light away."
-        message_until = 5.0
-        game_result = None
+    def draw_stone_angel() -> None:
+        if session.result == "won":
+            return
+        progress = min(1.0, session.angel_blinks / ANGEL_BLINK_LIMIT)
+        height = round(126 + 440 * progress)
+        width = round(stone_angel.get_width() * height / stone_angel.get_height())
+        x = round(10 + 350 * progress)
+        y = round(142 + 170 * progress)
+        size = (width, height)
+        if size not in angel_frames:
+            angel_frames[size] = pygame.transform.smoothscale(stone_angel, size)
+        angel = angel_frames[size]
+        screen.blit(angel, (x, y))
+
+    def reset_game(now: float) -> None:
+        nonlocal session, eyes_closed_held
+        session = GameSession(now)
+        eyes_closed_held = False
 
     while running:
         dt = min(clock.tick(60) / 1000.0, 0.05)
         now = time.monotonic()
+        session.update(now, dt, eyes_closed_held)
 
         while True:
             try:
@@ -261,7 +462,7 @@ def main() -> None:
                 input_mode = "BLE"
                 connection_status = f"Connected: {detail}"
             elif event_type == "blink":
-                trigger_blink(now, detail)
+                session.blink(now)
             elif event_type == "error":
                 input_mode = "BLE ERROR"
                 connection_status = f"BLE unavailable: {detail}"
@@ -274,10 +475,11 @@ def main() -> None:
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
-                elif event.key == pygame.K_SPACE:
-                    trigger_blink(now)
+                elif event.key == pygame.K_SPACE and not getattr(event, "repeat", False):
+                    eyes_closed_held = True
+                    session.blink(now)
                 elif event.key == pygame.K_r:
-                    reset_game()
+                    reset_game(now)
                 elif event.key == pygame.K_b:
                     start_ble()
                 elif event.key == pygame.K_s:
@@ -286,6 +488,10 @@ def main() -> None:
                     ble_stop.set()
                     input_mode = "SIMULATOR"
                     connection_status = "Disconnected. Simulator ready — SPACE = blink"
+            elif event.type == pygame.KEYUP and event.key == pygame.K_SPACE:
+                eyes_closed_held = False
+            elif event.type == getattr(pygame, "WINDOWFOCUSLOST", -1):
+                eyes_closed_held = False
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if connect_button.collidepoint(event.pos):
                     start_ble()
@@ -296,18 +502,19 @@ def main() -> None:
                     input_mode = "SIMULATOR"
                     connection_status = "Disconnected. Simulator ready — SPACE = blink"
 
-        if game_result is None:
-            elapsed += dt
-            threat = min(1.0, threat + dt * THREAT_GROWTH_PER_SECOND)
-            if threat >= 1.0:
-                game_result = "lost"
-            elif elapsed >= SURVIVE_SECONDS:
-                game_result = "won"
-
-        screen.fill(INK)
-        screen.blit(background_image, background_offset)
-        draw_shadow()
-        draw_character(now)
+        if session.result == "won":
+            screen.fill(WHITE)
+        else:
+            background, background_offset = backgrounds[session.encounter.background]
+            screen.blit(background, background_offset)
+            draw_enemy(now)
+            draw_stone_angel()
+            if session.encounter.input_type == "hold":
+                alpha = int(
+                    255 * session.closed_eyes_progress / CLOSED_EYES_SECONDS
+                )
+                fog_overlay.fill((WHITE[0], WHITE[1], WHITE[2], alpha))
+                screen.blit(fog_overlay, (0, 0))
         draw_hud(now)
         pygame.display.flip()
 
